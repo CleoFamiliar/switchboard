@@ -3,7 +3,7 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "switchyard"
+name = "switchboard"
 version = "0.1.0"
 description = "Human-first multi-repo orchestration for AI coding agents"
 readme = "README.md"
@@ -16,7 +16,7 @@ dependencies = [
 ]
 
 [project.scripts]
-sw = "switchyard.cli:main"
+sw = "switchboard.cli:main"
 
 [project.optional-dependencies]
 dev = [

@@ -1,8 +1,8 @@
-# Switchyard
+# Switchboard
 
 **Human-first multi-repo orchestration for AI coding agents.**
 
-Switchyard is a thin Python orchestration layer on top of [beads](https://github.com/gastownhall/beads) for coordinating AI coding agents across multiple repos — with human checkpoints as a first-class primitive.
+Switchboard is a thin Python orchestration layer on top of [beads](https://github.com/gastownhall/beads) for coordinating AI coding agents across multiple repos — with human checkpoints as a first-class primitive.
 
 ## What It Is
 
@@ -36,7 +36,7 @@ See `repos.yaml` for example repo config.
 
 ## Architecture
 
-Switchyard wraps `bd` (beads CLI) for the task graph and adds:
+Switchboard wraps `bd` (beads CLI) for the task graph and adds:
 - `checkpoint` task type with ack workflow
 - `triggers_update` dep relation for cross-repo artifact deps
 - Session tracking (append-only JSONL)

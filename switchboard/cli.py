@@ -9,7 +9,7 @@ Provides subcommands:
   sw search       — semantic search over task history via Qdrant
   sw tree         — render dependency tree with status colours
 
-All task graph operations delegate to `bd` (beads CLI). Switchyard adds:
+All task graph operations delegate to `bd` (beads CLI). Switchboard adds:
 - checkpoint ack workflow
 - cross-repo filtering
 - Qdrant-powered search
@@ -25,7 +25,7 @@ console = Console()
 @click.group()
 @click.version_option()
 def main():
-    """Switchyard — human-first multi-repo orchestration for AI coding agents."""
+    """Switchboard — human-first multi-repo orchestration for AI coding agents."""
     pass
 
 

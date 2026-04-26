@@ -1,5 +1,5 @@
 """
-Switchyard — Human-first multi-repo orchestration for AI coding agents.
+Switchboard — Human-first multi-repo orchestration for AI coding agents.
 
 Thin orchestration layer on top of beads (bd CLI) for coordinating AI coding
 agents across multiple repos with human checkpoints first-class.
