@@ -1,0 +1,7 @@
+{
+  "database": "dolt",
+  "backend": "dolt",
+  "dolt_mode": "embedded",
+  "dolt_database": "switchboard",
+  "project_id": "96f3d71c-4302-4d05-9a10-243c5722bffb"
+}
