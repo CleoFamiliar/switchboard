@@ -708,3 +708,98 @@ def state_clear(task_id):
         console.print(f"[green]✓[/green] Cleared state for {task_id}")
     else:
         console.print(f"[dim]No state found for {task_id}[/dim]")
+
+
+# ── sw session ────────────────────────────────────────────────────────────────
+
+@main.group()
+def session():
+    """Manage session lifecycle events."""
+    pass
+
+
+@session.command("start")
+@click.option("--actor", "-a", default=None, help="Actor starting the session (default: current user)")
+def session_start(actor):
+    """Start a new session, logging the event to the sessions JSONL."""
+    if actor is None:
+        actor = os.environ.get("USER", "unknown")
+
+    config = _try_load_config()
+    sessions_log = config.sessions_log_path if config else SESSIONS_LOG
+    sessions_log.parent.mkdir(parents=True, exist_ok=True)
+
+    event = {
+        "event": "session_start",
+        "actor": actor,
+        "session_id": os.environ.get("CLAUDE_SESSION_ID"),
+        "timestamp": datetime.datetime.now().isoformat(),
+    }
+    with open(sessions_log, "a") as f:
+        f.write(json.dumps(event) + "\n")
+
+    console.print(f"[green]Session started[/green] by [bold]{actor}[/bold]")
+    console.print(f"  Logged to {sessions_log}")
+
+
+@session.command("end")
+@click.option("--notes", "-n", default=None, help="Session closing notes / summary")
+def session_end(notes):
+    """End the current session, logging the event with optional notes."""
+    actor = os.environ.get("USER", "unknown")
+
+    config = _try_load_config()
+    sessions_log = config.sessions_log_path if config else SESSIONS_LOG
+    sessions_log.parent.mkdir(parents=True, exist_ok=True)
+
+    event = {
+        "event": "session_end",
+        "actor": actor,
+        "session_id": os.environ.get("CLAUDE_SESSION_ID"),
+        "notes": notes,
+        "timestamp": datetime.datetime.now().isoformat(),
+    }
+    with open(sessions_log, "a") as f:
+        f.write(json.dumps(event) + "\n")
+
+    console.print(f"[green]Session ended[/green] by [bold]{actor}[/bold]")
+    if notes:
+        console.print(f"  Notes: {notes}")
+    console.print(f"  Logged to {sessions_log}")
+
+
+# ── sw reindex ────────────────────────────────────────────────────────────────
+
+@main.command()
+def reindex():
+    """Rebuild the Qdrant search index from the full beads task graph.
+
+    Requires a running Qdrant instance and an embedding backend (openai or
+    sentence-transformers). Gracefully errors if not configured.
+    """
+    config = _try_load_config()
+    if config:
+        host = config.qdrant.host
+        port = config.qdrant.port
+        collection = config.qdrant.collection
+    else:
+        host, port, collection = "localhost", 6333, "switchyard"
+
+    try:
+        from .qdrant import get_client, reindex_all
+    except ImportError as e:
+        console.print(f"[red]Qdrant not available:[/red] {e}")
+        raise SystemExit(1)
+
+    try:
+        client = get_client(host=host, port=port)
+        count = reindex_all(client, collection)
+        console.print(f"[green]Indexed {count} tasks[/green] into [bold]{collection}[/bold]")
+    except ImportError as e:
+        console.print(f"[red]Embedding backend not available:[/red] {e}")
+        console.print("[dim]Install openai or sentence-transformers to enable search indexing.[/dim]")
+        raise SystemExit(1)
+    except Exception as e:
+        console.print(f"[red]Reindex failed:[/red] {e}")
+        console.print("[dim]Is Qdrant running at {host}:{port}?[/dim]")
+        raise SystemExit(1)
