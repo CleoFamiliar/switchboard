@@ -1,31 +1,38 @@
 """
-qdrant.py — Qdrant integration for semantic search over task history.
+qdrant.py — Qdrant overlay for semantic search over jack history.
 
-Stores task descriptions, notes, and checkpoint decisions as vectors in
+Stores jack descriptions, notes, and completion context as vectors in
 a Qdrant collection, enabling natural language search over past work.
 
-The Qdrant integration is ADDITIVE: the task graph works without it.
-`sw search` simply won't work if Qdrant is unavailable.
+The Qdrant integration is ADDITIVE: the jack graph works without it.
+`sw search` falls back to bd search if Qdrant is unavailable.
 
 Collection schema (payload per point):
   {
-    "task_id": "bd-a1b2",
+    "jack_id": "jack-a1b2",
     "title": "...",
     "description": "...",
     "notes": "...",
     "repo": "component-lib",
     "status": "done",
-    "type": "task" | "checkpoint" | ...,
-    "updated_at": "<iso timestamp>"
+    "type": "jack" | "hold" | ...,
+    "updated_at": "<iso timestamp>",
+    "commit_msg": "...",       # set on sw done
+    "diff_summary": "...",     # set on sw done
+    "indexed_at": "<iso>"      # set on sw done
   }
 
-Embedding model: text-embedding-3-small (OpenAI) or a local model.
-Vector size depends on model — defaults to 1536 for text-embedding-3-small.
+Embedding model: all-MiniLM-L6-v2 (local, no API key needed via sentence-transformers).
+Falls back to OpenAI text-embedding-3-small if sentence-transformers is unavailable.
+Vector size: 384 for all-MiniLM-L6-v2, 1536 for OpenAI.
 
 Indexing is triggered:
-- When a task is created (`sw update --notes` or checkpoint ack)
+- When a jack is completed via `sw done` (indexes commit msg + diff summary)
 - On explicit `sw reindex` (full rebuild from beads graph)
 - NOT automatically on every bd operation (too noisy)
+
+The `sw search` command queries the full index, with active-jack context
+injected into the query to weight results toward the current workspace.
 """
 
 import hashlib
@@ -34,15 +41,30 @@ import subprocess
 from typing import Any, Optional
 
 _embed_fn = None
+_vector_size = None
 
 
 def _get_embed_fn():
-    """Return an embedding function. Tries OpenAI first, then sentence-transformers."""
-    global _embed_fn
+    """Return an embedding function. Prefers sentence-transformers (local, no API key)."""
+    global _embed_fn, _vector_size
     if _embed_fn is not None:
         return _embed_fn
 
-    # Try OpenAI
+    # Prefer sentence-transformers: local, no API key needed
+    try:
+        from sentence_transformers import SentenceTransformer
+        model = SentenceTransformer("all-MiniLM-L6-v2")
+
+        def _st_embed(text: str) -> list[float]:
+            return model.encode(text).tolist()
+
+        _embed_fn = _st_embed
+        _vector_size = 384
+        return _embed_fn
+    except ImportError:
+        pass
+
+    # Fall back to OpenAI if available
     try:
         import openai
         client = openai.OpenAI()
@@ -52,43 +74,50 @@ def _get_embed_fn():
             return resp.data[0].embedding
 
         _embed_fn = _openai_embed
+        _vector_size = 1536
         return _embed_fn
     except (ImportError, Exception):
         pass
 
-    # Try sentence-transformers
-    try:
-        from sentence_transformers import SentenceTransformer
-        model = SentenceTransformer("all-MiniLM-L6-v2")
-
-        def _st_embed(text: str) -> list[float]:
-            return model.encode(text).tolist()
-
-        _embed_fn = _st_embed
-        return _embed_fn
-    except ImportError:
-        pass
-
     raise ImportError(
         "No embedding backend available. Install one of:\n"
-        "  pip install openai          # for text-embedding-3-small (needs OPENAI_API_KEY)\n"
-        "  pip install sentence-transformers  # for local all-MiniLM-L6-v2"
+        "  pip install sentence-transformers  # local all-MiniLM-L6-v2 (recommended)\n"
+        "  pip install openai                 # text-embedding-3-small (needs OPENAI_API_KEY)"
     )
 
 
-def _task_id_to_int(task_id: str) -> int:
-    """Hash a task ID string to a uint64 for Qdrant point ID."""
-    h = hashlib.sha256(task_id.encode()).hexdigest()
+def get_vector_size() -> int:
+    """Return the vector size for the current embedding backend."""
+    global _vector_size
+    if _vector_size is None:
+        embed = _get_embed_fn()
+        sample = embed("test")
+        _vector_size = len(sample)
+    return _vector_size
+
+
+def _jack_id_to_int(jack_id: str) -> int:
+    """Hash a jack ID string to a uint64 for Qdrant point ID."""
+    h = hashlib.sha256(jack_id.encode()).hexdigest()
     return int(h[:16], 16)
 
 
-def _task_text(task: dict[str, Any]) -> str:
-    """Build the text to embed from a task dict."""
+def _jack_text(jack: dict[str, Any], include_completion: bool = False) -> str:
+    """Build the text to embed from a jack dict.
+
+    Base text: title + description + notes.
+    With include_completion: also adds commit_msg + diff_summary for done jacks.
+    """
     parts = [
-        task.get("title", ""),
-        task.get("description", ""),
-        task.get("notes", ""),
+        jack.get("title", ""),
+        jack.get("description", ""),
+        jack.get("notes", ""),
     ]
+    if include_completion:
+        parts.extend([
+            jack.get("commit_msg", ""),
+            jack.get("diff_summary", ""),
+        ])
     return " ".join(p for p in parts if p).strip()
 
 
@@ -101,12 +130,15 @@ def get_client(host: str = "localhost", port: int = 6333):
     return QdrantClient(host=host, port=port)
 
 
-def ensure_collection(client, collection: str = "switchyard", vector_size: int = 1536) -> None:
+def ensure_collection(client, collection: str = "switchyard", vector_size: Optional[int] = None) -> None:
     """Create the Qdrant collection if it doesn't exist.
 
-    Uses cosine distance. Call once at startup before indexing.
+    Uses cosine distance. Defaults to the current backend's vector size.
     """
     from qdrant_client.models import Distance, VectorParams
+
+    if vector_size is None:
+        vector_size = get_vector_size()
 
     collections = [c.name for c in client.get_collections().collections]
     if collection not in collections:
@@ -116,32 +148,98 @@ def ensure_collection(client, collection: str = "switchyard", vector_size: int =
         )
 
 
-def index_task(client, collection: str, task: dict[str, Any]) -> None:
-    """Embed and upsert a task into the Qdrant collection.
+def index_jack(client, collection: str, jack: dict[str, Any]) -> None:
+    """Embed and upsert a jack into the Qdrant collection.
 
-    Embeds the concatenation of title + description + notes, then upserts
-    the vector with full task payload. Uses task_id as the point ID (hashed
-    to uint64 for Qdrant compatibility).
+    Base index: title + description + notes. Used for active and open jacks.
+    For completed jacks with commit/diff context, use index_jack_completion instead.
     """
     from qdrant_client.models import PointStruct
 
     embed = _get_embed_fn()
-    text = _task_text(task)
+    text = _jack_text(jack)
     if not text:
         return
 
     vector = embed(text)
-    point_id = _task_id_to_int(task.get("id", task.get("task_id", "unknown")))
+    jack_id = jack.get("id", jack.get("jack_id", "unknown"))
+    point_id = _jack_id_to_int(jack_id)
 
     payload = {
-        "task_id": task.get("id", ""),
-        "title": task.get("title", ""),
-        "description": task.get("description", ""),
-        "notes": task.get("notes", ""),
-        "repo": task.get("repo", ""),
-        "status": task.get("status", ""),
-        "type": task.get("issue_type", task.get("type", "")),
-        "updated_at": task.get("updated_at", ""),
+        "jack_id": jack_id,
+        "title": jack.get("title", ""),
+        "description": jack.get("description", ""),
+        "notes": jack.get("notes", ""),
+        "repo": jack.get("repo", ""),
+        "status": jack.get("status", ""),
+        "type": jack.get("issue_type", jack.get("type", "")),
+        "updated_at": jack.get("updated_at", ""),
+        "commit_msg": jack.get("commit_msg", ""),
+        "diff_summary": jack.get("diff_summary", ""),
+    }
+
+    client.upsert(
+        collection_name=collection,
+        points=[PointStruct(id=point_id, vector=vector, payload=payload)],
+    )
+
+
+def index_jack_completion(
+    client,
+    collection: str,
+    jack_id: str,
+    commit_msg: str,
+    diff_summary: str,
+    existing_jack: Optional[dict[str, Any]] = None,
+) -> None:
+    """Index a jack's completion context (commit message + diff summary).
+
+    Called by `sw done` after a jack is closed. Enriches the jack's vector
+    with commit and diff context so future searches surface relevant history.
+
+    If existing_jack is provided, merges completion data into it before indexing.
+    Otherwise fetches the jack from beads first.
+    """
+    import datetime
+    from qdrant_client.models import PointStruct
+
+    if existing_jack is None:
+        # Try to fetch from beads
+        result = subprocess.run(
+            ["bd", "show", jack_id, "--json"],
+            capture_output=True, text=True,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            existing_jack = json.loads(result.stdout)
+        else:
+            existing_jack = {"id": jack_id}
+
+    jack = dict(existing_jack)
+    jack["commit_msg"] = commit_msg
+    jack["diff_summary"] = diff_summary
+    jack["indexed_at"] = datetime.datetime.now().isoformat()
+
+    embed = _get_embed_fn()
+    # Embed with full completion context for richer semantic matching
+    text = _jack_text(jack, include_completion=True)
+    if not text:
+        return
+
+    vector = embed(text)
+    point_id = _jack_id_to_int(jack_id)
+
+    payload = {
+        "jack_id": jack_id,
+        "title": jack.get("title", ""),
+        "description": jack.get("description", ""),
+        "notes": jack.get("notes", ""),
+        "repo": jack.get("repo", ""),
+        "status": "done",
+        "type": jack.get("issue_type", jack.get("type", "")),
+        "updated_at": jack.get("updated_at", ""),
+        "commit_msg": commit_msg,
+        "diff_summary": diff_summary,
+        "indexed_at": jack["indexed_at"],
     }
 
     client.upsert(
@@ -156,16 +254,26 @@ def search(
     query: str,
     limit: int = 10,
     repo_filter: Optional[str] = None,
+    active_jack_context: Optional[str] = None,
 ) -> list[dict[str, Any]]:
     """Search the Qdrant collection with a natural language query.
 
-    Embeds the query and returns the top-k most similar tasks, optionally
-    filtered by repo. Returns a list of payload dicts with a `score` field.
+    Embeds the query and returns the top-k most similar jacks. If
+    active_jack_context is provided, it is prepended to the query to weight
+    results toward the current jack's domain (e.g. repo, current task title).
+
+    Returns a list of payload dicts with a `score` field appended.
     """
     from qdrant_client.models import Filter, FieldCondition, MatchValue
 
     embed = _get_embed_fn()
-    query_vector = embed(query)
+
+    # Weight toward active jack context by prepending it to the query
+    effective_query = query
+    if active_jack_context:
+        effective_query = f"{active_jack_context} {query}"
+
+    query_vector = embed(effective_query)
 
     query_filter = None
     if repo_filter:
@@ -189,10 +297,10 @@ def search(
 
 
 def reindex_all(client, collection: str) -> int:
-    """Rebuild the Qdrant collection from the full beads task graph.
+    """Rebuild the Qdrant collection from the full beads jack graph.
 
-    Fetches all tasks from beads, embeds each one, and upserts into Qdrant.
-    Returns the number of tasks indexed. Intended for `sw reindex` command.
+    Fetches all jacks from beads, embeds each one, and upserts into Qdrant.
+    Returns the number of jacks indexed. Intended for `sw reindex` command.
     """
     result = subprocess.run(
         ["bd", "list", "--json", "--limit", "0"],
@@ -201,21 +309,17 @@ def reindex_all(client, collection: str) -> int:
     if result.returncode != 0:
         raise RuntimeError(f"bd list failed: {result.stderr.strip()}")
 
-    tasks = json.loads(result.stdout) if result.stdout.strip() else []
+    jacks = json.loads(result.stdout) if result.stdout.strip() else []
 
-    # Detect vector size from the embedding function
-    embed = _get_embed_fn()
-    sample_vec = embed("test")
-    vector_size = len(sample_vec)
-
+    vector_size = get_vector_size()
     ensure_collection(client, collection, vector_size=vector_size)
 
     count = 0
-    for task in tasks:
-        text = _task_text(task)
+    for jack in jacks:
+        text = _jack_text(jack)
         if not text:
             continue
-        index_task(client, collection, task)
+        index_jack(client, collection, jack)
         count += 1
 
     return count

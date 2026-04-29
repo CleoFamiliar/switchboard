@@ -1,4 +1,4 @@
-"""Tests for switchboard: config, TSO, checkpoints, and sessions."""
+"""Tests for switchboard: config, TSO (jack state), holds, and sessions."""
 
 import json
 import os
@@ -46,6 +46,7 @@ def tmp_repos_yaml(tmp_path):
         "sessions": {
             "log_path": str(tmp_path / "sessions.jsonl"),
         },
+        "mode": "deliberate",
     }
     path = tmp_path / "repos.yaml"
     path.write_text(yaml.dump(config))
@@ -97,13 +98,31 @@ def test_load_config_duplicate_ids(tmp_path):
         load_config(path)
 
 
+def test_load_config_mode(tmp_repos_yaml):
+    cfg = load_config(tmp_repos_yaml)
+    assert cfg.mode == "deliberate"
+
+
+def test_load_config_mode_default(tmp_path):
+    """Config without mode field should default to deliberate."""
+    config = {
+        "repos": [
+            {"id": "r1", "name": "R1", "remote": "x"},
+        ]
+    }
+    path = tmp_path / "repos.yaml"
+    path.write_text(yaml.dump(config))
+    cfg = load_config(path)
+    assert cfg.mode == "deliberate"
+
+
 # ── TSO save/load roundtrip ──────────────────────────────────────────────────
 
 def test_tso_save_load_roundtrip(tmp_path):
     """TSO should survive a save/load cycle with all fields intact."""
     with mock.patch("switchboard.cli.TSO_DIR", tmp_path):
-        tso = load_tso("test-task-1")
-        assert tso["task_id"] == "test-task-1"
+        tso = load_tso("test-jack-1")
+        assert tso["jack_id"] == "test-jack-1"
         assert tso["goal"] is None
 
         tso["goal"] = "Fix the widget parser"
@@ -112,10 +131,10 @@ def test_tso_save_load_roundtrip(tmp_path):
         tso["dead_ends"] = [{"what": "regex approach", "why": "too slow"}]
         tso["next_action"] = {"action": "add unit test", "why": "reproduce first"}
 
-        path = save_tso("test-task-1", tso)
+        path = save_tso("test-jack-1", tso)
         assert path.exists()
 
-        loaded = load_tso("test-task-1")
+        loaded = load_tso("test-jack-1")
         assert loaded["goal"] == "Fix the widget parser"
         assert loaded["assumptions"] == ["input is UTF-8", "max 10MB"]
         assert loaded["hypotheses"] == ["off-by-one in line counter"]
@@ -124,11 +143,11 @@ def test_tso_save_load_roundtrip(tmp_path):
         assert loaded["updated_at"] is not None
 
 
-# ── Checkpoint listing with mocked bd ─────────────────────────────────────────
+# ── Hold listing with mocked bd ──────────────────────────────────────────────
 
-def test_checkpoint_list_with_mocked_bd():
+def test_hold_list_with_mocked_bd():
     """sw checkpoint list should parse bd JSON output."""
-    mock_tasks = [
+    mock_jacks = [
         {
             "id": "bd-aaaa",
             "title": "Review API design",
@@ -140,8 +159,8 @@ def test_checkpoint_list_with_mocked_bd():
         },
         {
             "id": "bd-bbbb",
-            "title": "Regular task",
-            "issue_type": "task",
+            "title": "Regular jack",
+            "issue_type": "jack",
             "status": "open",
             "assignee": "cleo",
             "description": "",
@@ -151,14 +170,14 @@ def test_checkpoint_list_with_mocked_bd():
 
     mock_result = mock.Mock()
     mock_result.returncode = 0
-    mock_result.stdout = json.dumps(mock_tasks)
+    mock_result.stdout = json.dumps(mock_jacks)
 
     with mock.patch("switchboard.checkpoint._run_bd", return_value=mock_result):
-        from switchboard.checkpoint import list_open_checkpoints
-        checkpoints = list_open_checkpoints()
-        assert len(checkpoints) == 1
-        assert checkpoints[0].id == "bd-aaaa"
-        assert checkpoints[0].title == "Review API design"
+        from switchboard.checkpoint import list_open_holds
+        holds = list_open_holds()
+        assert len(holds) == 1
+        assert holds[0].id == "bd-aaaa"
+        assert holds[0].title == "Review API design"
 
 
 # ── Session start/end logging ─────────────────────────────────────────────────

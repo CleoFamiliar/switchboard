@@ -6,12 +6,17 @@ a typed Config object used throughout the CLI.
 
 Responsibilities:
 - Find and load repos.yaml (walk up from cwd, then fallback to ~)
-- Parse repo entries, checkpoint defaults, qdrant settings, session log path
+- Parse repo entries, hold defaults, qdrant settings, session log path
+- Parse workspace mode (prototype | deliberate)
 - Validate required fields (repo IDs must be unique, paths must be strings)
 - Expand ~ in local_path values
 - Provide a `get_repo(id)` helper for lookups
 
 Config is loaded once per CLI invocation and passed via Click context.
+
+Modes:
+  deliberate — all holds require explicit operator ack (safe default)
+  prototype  — holds with requires:any auto-ack; only requires:kale still blocks
 """
 
 from dataclasses import dataclass, field
@@ -30,11 +35,15 @@ class RepoConfig:
 
 
 @dataclass
-class CheckpointDefaults:
+class HoldDefaults:
     requires: str = "kale"
     publish_requires: str = "kale"
     deploy_requires: str = "kale"
     test_requires: str = "any"
+
+
+# Legacy alias
+CheckpointDefaults = HoldDefaults
 
 
 @dataclass
@@ -47,9 +56,10 @@ class QdrantConfig:
 @dataclass
 class Config:
     repos: list[RepoConfig] = field(default_factory=list)
-    checkpoint_defaults: CheckpointDefaults = field(default_factory=CheckpointDefaults)
+    checkpoint_defaults: HoldDefaults = field(default_factory=HoldDefaults)
     qdrant: QdrantConfig = field(default_factory=QdrantConfig)
     sessions_log_path: Path = Path("~/.openclaw/workspace/orchestration/sessions.jsonl")
+    mode: str = "deliberate"  # "deliberate" | "prototype"
 
     def get_repo(self, repo_id: str) -> Optional[RepoConfig]:
         """Return repo config by ID, or None if not found."""
@@ -106,7 +116,7 @@ def load_config(path: Optional[Path] = None) -> Config:
         raise ValueError(f"Duplicate repo IDs in {path}: {ids}")
 
     cp_raw = raw.get("checkpoint_defaults", {})
-    cp = CheckpointDefaults(
+    cp = HoldDefaults(
         requires=cp_raw.get("requires", "kale"),
         publish_requires=cp_raw.get("publish_requires", "kale"),
         deploy_requires=cp_raw.get("deploy_requires", "kale"),
@@ -126,9 +136,14 @@ def load_config(path: Optional[Path] = None) -> Config:
         "~/.openclaw/workspace/orchestration/sessions.jsonl",
     )).expanduser()
 
+    workspace_mode = raw.get("mode", "deliberate")
+    if workspace_mode not in ("deliberate", "prototype"):
+        workspace_mode = "deliberate"
+
     return Config(
         repos=repos,
         checkpoint_defaults=cp,
         qdrant=qdrant,
         sessions_log_path=log_path,
+        mode=workspace_mode,
     )
