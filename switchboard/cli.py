@@ -38,6 +38,7 @@ from rich import box
 
 from .checkpoint import list_open_holds, ack_hold
 from .config import load_config
+from .repos import find_triggers_update_jacks
 
 console = Console()
 
@@ -418,6 +419,9 @@ def done(jack_id, commit_msg, diff_summary):
         raise SystemExit(1)
     console.print(f"[green]Jack {jack_id} closed.[/green]")
 
+    # Check for cross-repo triggers_update relations
+    _check_triggers_update(jack_id)
+
     # Index completion context in Qdrant if available
     if commit_msg or diff_summary:
         config = _try_load_config()
@@ -437,6 +441,47 @@ def done(jack_id, commit_msg, diff_summary):
             console.print(f"[dim]Indexed completion context in Qdrant.[/dim]")
         except Exception as e:
             console.print(f"[dim]Qdrant unavailable, skipping index: {e}[/dim]")
+
+
+def _check_triggers_update(jack_id: str):
+    """Check if the completed jack has triggers_update relations and notify."""
+    # Look up the jack's labels to determine its repo
+    jack_info = _run_bd_json("show", jack_id)
+    if not jack_info:
+        return
+
+    if isinstance(jack_info, list):
+        jack_info = jack_info[0] if jack_info else {}
+
+    labels = jack_info.get("labels") or []
+    title = (jack_info.get("title") or "").lower()
+    desc = (jack_info.get("description") or "").lower()
+
+    # Check if this jack itself is a triggers_update jack (it was the trigger)
+    is_trigger = (
+        "triggers_update" in labels
+        or "triggers_update" in title
+        or "triggers_update" in desc
+    )
+
+    if not is_trigger:
+        return
+
+    # Find which repos are targeted by this trigger
+    config = _try_load_config()
+    if not config:
+        return
+
+    target_repos = []
+    for repo in config.repos:
+        if repo.id in labels or repo.id in title or repo.id in desc:
+            target_repos.append(repo.id)
+
+    if target_repos:
+        console.print(f"\n[yellow bold]triggers_update:[/yellow bold] This jack signals update required in:")
+        for repo_id in target_repos:
+            console.print(f"  [yellow]-> {repo_id}[/yellow]")
+        console.print("[dim]Check downstream repos for pending update jacks.[/dim]")
 
 
 # ── sw search ────────────────────────────────────────────────────────────────
