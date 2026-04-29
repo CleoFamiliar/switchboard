@@ -149,7 +149,7 @@ def test_hold_list_with_mocked_bd():
     """sw checkpoint list should parse bd JSON output."""
     mock_jacks = [
         {
-            "id": "bd-aaaa",
+            "id": "jack-aaaa",
             "title": "Review API design",
             "issue_type": "checkpoint",
             "status": "open",
@@ -158,7 +158,7 @@ def test_hold_list_with_mocked_bd():
             "labels": [],
         },
         {
-            "id": "bd-bbbb",
+            "id": "jack-bbbb",
             "title": "Regular jack",
             "issue_type": "jack",
             "status": "open",
@@ -176,7 +176,7 @@ def test_hold_list_with_mocked_bd():
         from switchboard.checkpoint import list_open_holds
         holds = list_open_holds()
         assert len(holds) == 1
-        assert holds[0].id == "bd-aaaa"
+        assert holds[0].id == "jack-aaaa"
         assert holds[0].title == "Review API design"
 
 
