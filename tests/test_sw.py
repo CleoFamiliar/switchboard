@@ -238,3 +238,265 @@ def test_session_start_default_actor(tmp_path):
 
     events = [json.loads(line) for line in log_path.read_text().splitlines()]
     assert events[0]["actor"] == "whoami"
+
+
+# ── sw create ────────────────────────────────────────────────────────────────
+
+def test_create_task(tmp_path):
+    """sw create should call bd create and log event."""
+    log_path = tmp_path / "sessions.jsonl"
+    runner = CliRunner()
+
+    mock_result = mock.Mock()
+    mock_result.returncode = 0
+    mock_result.stdout = "jack-xxxx"
+    mock_result.stderr = ""
+
+    with mock.patch("switchboard.cli._run_bd", return_value=mock_result) as mock_bd, \
+         mock.patch("switchboard.cli._try_load_config") as mock_cfg:
+        cfg = mock.Mock()
+        cfg.sessions_log_path = log_path
+        mock_cfg.return_value = cfg
+
+        result = runner.invoke(main, ["create", "Test task", "-t", "task", "-p", "1"])
+        assert result.exit_code == 0
+        assert "Created jack" in result.output
+
+    # Check bd was called with right args
+    call_args = mock_bd.call_args[0]
+    assert "create" in call_args
+    assert "--title=Test task" in call_args
+    assert "--type=task" in call_args
+    assert "--priority=1" in call_args
+
+    # Check event logged
+    events = [json.loads(line) for line in log_path.read_text().splitlines()]
+    assert len(events) == 1
+    assert events[0]["event"] == "jack_create"
+    assert events[0]["title"] == "Test task"
+
+
+def test_create_checkpoint_adds_label(tmp_path):
+    """sw create checkpoint should add checkpoint label and set assignee."""
+    log_path = tmp_path / "sessions.jsonl"
+    runner = CliRunner()
+
+    mock_result = mock.Mock()
+    mock_result.returncode = 0
+    mock_result.stdout = "jack-yyyy"
+    mock_result.stderr = ""
+
+    with mock.patch("switchboard.cli._run_bd", return_value=mock_result) as mock_bd, \
+         mock.patch("switchboard.cli._try_load_config") as mock_cfg:
+        cfg = mock.Mock()
+        cfg.sessions_log_path = log_path
+        mock_cfg.return_value = cfg
+
+        result = runner.invoke(main, ["create", "Review design", "-t", "checkpoint", "--requires", "kale"])
+        assert result.exit_code == 0
+
+    call_args = mock_bd.call_args[0]
+    assert "--type=checkpoint" in call_args
+    assert "--assignee=kale" in call_args
+    assert "--label" in call_args
+    # checkpoint label should be present
+    label_idx = [i for i, a in enumerate(call_args) if a == "--label"]
+    label_values = [call_args[i + 1] for i in label_idx]
+    assert "checkpoint" in label_values
+
+
+# ── sw show ──────────────────────────────────────────────────────────────────
+
+def test_show_basic(tmp_path):
+    """sw show should display formatted jack info."""
+    runner = CliRunner()
+
+    mock_jack = {
+        "id": "jack-1234",
+        "title": "Fix the widget",
+        "status": "open",
+        "priority": 2,
+        "issue_type": "task",
+        "assignee": "cleo",
+        "created_at": "2026-04-29T10:00:00",
+        "labels": ["component-lib"],
+        "description": "Widget is broken",
+    }
+    mock_deps = []
+
+    def mock_bd_json(*args):
+        if "show" in args:
+            return mock_jack
+        if "dep" in args:
+            return mock_deps
+        return []
+
+    with mock.patch("switchboard.cli._run_bd_json", side_effect=mock_bd_json), \
+         mock.patch("switchboard.cli.load_tso", return_value={}):
+        result = runner.invoke(main, ["show", "jack-1234"])
+        assert result.exit_code == 0
+        assert "Fix the widget" in result.output
+        assert "cleo" in result.output
+        assert "component-lib" in result.output
+
+
+def test_show_raw():
+    """sw show --raw should print raw bd output."""
+    runner = CliRunner()
+
+    mock_result = mock.Mock()
+    mock_result.returncode = 0
+    mock_result.stdout = "raw bd output here"
+    mock_result.stderr = ""
+
+    with mock.patch("switchboard.cli._run_bd", return_value=mock_result):
+        result = runner.invoke(main, ["show", "jack-1234", "--raw"])
+        assert result.exit_code == 0
+        assert "raw bd output here" in result.output
+
+
+# ── sw init ──────────────────────────────────────────────────────────────────
+
+def test_init_creates_repos_yaml(tmp_path, monkeypatch):
+    """sw init should create repos.yaml and run bd init --stealth."""
+    monkeypatch.chdir(tmp_path)
+    runner = CliRunner()
+
+    mock_result = mock.Mock()
+    mock_result.returncode = 0
+    mock_result.stdout = ""
+    mock_result.stderr = ""
+
+    with mock.patch("switchboard.cli._run_bd", return_value=mock_result) as mock_bd:
+        result = runner.invoke(main, ["init"])
+        assert result.exit_code == 0
+        assert "initialised" in result.output.lower() or "Created repos.yaml" in result.output
+
+    # Check bd init --stealth was called
+    call_args = mock_bd.call_args[0]
+    assert "init" in call_args
+    assert "--stealth" in call_args
+
+    # Check repos.yaml created
+    repos_yaml = tmp_path / "repos.yaml"
+    assert repos_yaml.exists()
+    with open(repos_yaml) as f:
+        data = yaml.safe_load(f)
+    assert data["mode"] == "deliberate"
+    assert data["repos"] == []
+
+
+def test_init_skips_existing_repos_yaml(tmp_path, monkeypatch):
+    """sw init should not overwrite existing repos.yaml."""
+    monkeypatch.chdir(tmp_path)
+    repos_yaml = tmp_path / "repos.yaml"
+    repos_yaml.write_text("mode: prototype\nrepos:\n- id: existing\n")
+    runner = CliRunner()
+
+    mock_result = mock.Mock()
+    mock_result.returncode = 0
+    mock_result.stdout = ""
+    mock_result.stderr = ""
+
+    with mock.patch("switchboard.cli._run_bd", return_value=mock_result):
+        result = runner.invoke(main, ["init"])
+        assert result.exit_code == 0
+        assert "already exists" in result.output
+
+    # Original content preserved
+    with open(repos_yaml) as f:
+        data = yaml.safe_load(f)
+    assert data["mode"] == "prototype"
+
+
+# ── sw repo add / list ───────────────────────────────────────────────────────
+
+def test_repo_add(tmp_path, monkeypatch):
+    """sw repo add should append repo entry to repos.yaml."""
+    monkeypatch.chdir(tmp_path)
+    repos_yaml = tmp_path / "repos.yaml"
+    repos_yaml.write_text(yaml.dump({"mode": "deliberate", "repos": []}))
+    runner = CliRunner()
+
+    result = runner.invoke(main, ["repo", "add", "my-lib", "git@github.com:me/lib.git",
+                                  "--name", "My Library", "--version", "1.0"])
+    assert result.exit_code == 0
+    assert "Added repo" in result.output
+
+    with open(repos_yaml) as f:
+        data = yaml.safe_load(f)
+    assert len(data["repos"]) == 1
+    assert data["repos"][0]["id"] == "my-lib"
+    assert data["repos"][0]["remote"] == "git@github.com:me/lib.git"
+    assert data["repos"][0]["version"] == "1.0"
+
+
+def test_repo_add_duplicate(tmp_path, monkeypatch):
+    """sw repo add should reject duplicate IDs."""
+    monkeypatch.chdir(tmp_path)
+    repos_yaml = tmp_path / "repos.yaml"
+    repos_yaml.write_text(yaml.dump({"mode": "deliberate", "repos": [{"id": "dupe", "name": "D", "remote": "x"}]}))
+    runner = CliRunner()
+
+    result = runner.invoke(main, ["repo", "add", "dupe", "git@x.git"])
+    assert result.exit_code == 1
+    assert "already exists" in result.output
+
+
+def test_repo_list(tmp_path, monkeypatch):
+    """sw repo list should show registered repos."""
+    monkeypatch.chdir(tmp_path)
+    repos_yaml = tmp_path / "repos.yaml"
+    repos_yaml.write_text(yaml.dump({
+        "mode": "deliberate",
+        "repos": [
+            {"id": "alpha", "name": "Alpha", "remote": "git@a.git", "version": "2.0"},
+            {"id": "beta", "name": "Beta", "remote": "git@b.git"},
+        ],
+    }))
+    runner = CliRunner()
+
+    result = runner.invoke(main, ["repo", "list"])
+    assert result.exit_code == 0
+    assert "alpha" in result.output
+    assert "beta" in result.output
+
+
+# ── sw log ───────────────────────────────────────────────────────────────────
+
+def test_log_basic(tmp_path):
+    """sw log should show recent jacks and session events."""
+    log_path = tmp_path / "sessions.jsonl"
+    log_path.write_text(json.dumps({
+        "event": "session_start",
+        "actor": "kale",
+        "timestamp": "2026-04-29T10:00:00",
+    }) + "\n")
+
+    runner = CliRunner()
+
+    mock_jacks = [
+        {
+            "id": "jack-abcd",
+            "title": "Fix deploy",
+            "status": "open",
+            "priority": 1,
+            "updated_at": "2026-04-29T11:00:00",
+        },
+    ]
+
+    def mock_bd_json(*args):
+        if "list" in args:
+            return mock_jacks
+        return []
+
+    with mock.patch("switchboard.cli._run_bd_json", side_effect=mock_bd_json), \
+         mock.patch("switchboard.cli._try_load_config") as mock_cfg:
+        cfg = mock.Mock()
+        cfg.sessions_log_path = log_path
+        mock_cfg.return_value = cfg
+
+        result = runner.invoke(main, ["log"])
+        assert result.exit_code == 0
+        assert "jack-abcd" in result.output
+        assert "session_start" in result.output

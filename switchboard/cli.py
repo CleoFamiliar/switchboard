@@ -1006,3 +1006,368 @@ def reindex():
         console.print(f"[red]Reindex failed:[/red] {e}")
         console.print("[dim]Is Qdrant running at {host}:{port}?[/dim]")
         raise SystemExit(1)
+
+
+# ── sw create ────────────────────────────────────────────────────────────────
+
+@main.command()
+@click.argument("title")
+@click.option("--type", "-t", "issue_type", default="task",
+              type=click.Choice(["task", "bug", "checkpoint", "question", "epic"]),
+              help="Issue type (default: task)")
+@click.option("--repo", "-r", default=None, help="Label with repo ID from config")
+@click.option("--priority", "-p", default=2, type=int, help="Priority 0-4 (default: 2)")
+@click.option("--description", "-d", default=None, help="Longer description")
+@click.option("--requires", default=None,
+              type=click.Choice(["kale", "cleo", "any"]),
+              help="For checkpoint type: who must ack")
+def create(title, issue_type, repo, priority, description, requires):
+    """Create a new jack (wraps bd create).
+
+    For checkpoint type, also adds the 'checkpoint' label so existing
+    hold detection works.
+
+    TITLE: short summary of the jack
+    """
+    cmd = ["create", f"--title={title}", f"--type={issue_type}", f"--priority={priority}"]
+
+    if description:
+        cmd.append(f"--description={description}")
+
+    # For checkpoints, add label and store requires in assignee
+    if issue_type == "checkpoint":
+        req = requires or "kale"
+        cmd.append(f"--assignee={req}")
+
+    # Repo label
+    labels = []
+    if repo:
+        labels.append(repo)
+    if issue_type == "checkpoint":
+        labels.append("checkpoint")
+    for label in labels:
+        cmd.extend(["--label", label])
+
+    result = _run_bd(*cmd)
+    if result.returncode != 0:
+        console.print(f"[red]Error:[/red] {result.stderr.strip()}")
+        raise SystemExit(1)
+
+    console.print(f"[green]Created jack:[/green] {result.stdout.strip()}")
+
+    # Log creation event
+    config = _try_load_config()
+    sessions_log = config.sessions_log_path if config else SESSIONS_LOG
+    _log_create_event(sessions_log, title, issue_type, priority, repo, requires)
+
+
+def _log_create_event(sessions_log: Path, title, issue_type, priority, repo, requires):
+    """Append a jack_create event to the sessions JSONL."""
+    sessions_log.parent.mkdir(parents=True, exist_ok=True)
+    event = {
+        "event": "jack_create",
+        "title": title,
+        "issue_type": issue_type,
+        "priority": priority,
+        "repo": repo,
+        "requires": requires,
+        "actor": os.environ.get("USER", "unknown"),
+        "session_id": os.environ.get("CLAUDE_SESSION_ID"),
+        "timestamp": datetime.datetime.now().isoformat(),
+    }
+    with open(sessions_log, "a") as f:
+        f.write(json.dumps(event) + "\n")
+
+
+# ── sw show ──────────────────────────────────────────────────────────────────
+
+@main.command("show")
+@click.argument("jack_id")
+@click.option("--raw", is_flag=True, help="Print raw bd output instead of formatted view")
+def show(jack_id, raw):
+    """Show detailed info for a jack with rich formatting.
+
+    Displays status, priority, type, assignee, timestamps, description,
+    labels, blockers (patch cords in/out), and TSO summary if available.
+
+    JACK_ID: beads jack ID (e.g. jack-a1b2)
+    """
+    if raw:
+        result = _run_bd("show", jack_id)
+        if result.returncode != 0:
+            console.print(f"[red]Error:[/red] {result.stderr.strip()}")
+            raise SystemExit(1)
+        console.print(result.stdout.strip())
+        return
+
+    jack = _run_bd_json("show", jack_id)
+    if not jack:
+        console.print(f"[red]Error:[/red] jack {jack_id} not found")
+        raise SystemExit(1)
+
+    if isinstance(jack, list):
+        jack = jack[0] if jack else {}
+
+    st = jack.get("status", "?")
+    color = _status_color(st)
+    prio = jack.get("priority", "?")
+    itype = jack.get("issue_type", "?")
+    title = jack.get("title", "")
+
+    # Header panel
+    header = f"[bold]{jack_id}[/bold]  [{color}]{st}[/{color}]  P{prio}  [dim]{itype}[/dim]"
+    console.print(Panel(f"[bold]{title}[/bold]\n{header}", expand=False, border_style=color))
+
+    # Assignee
+    assignee = jack.get("assignee")
+    if assignee:
+        console.print(f"[bold]Assignee:[/bold] {assignee}")
+
+    # Timestamps
+    created = jack.get("created_at") or jack.get("created")
+    updated = jack.get("updated_at") or jack.get("updated")
+    if created:
+        console.print(f"[bold]Created:[/bold]  {created}")
+    if updated:
+        console.print(f"[bold]Updated:[/bold]  {updated}")
+
+    # Labels
+    labels = jack.get("labels") or []
+    if labels:
+        console.print(f"[bold]Labels:[/bold]   {', '.join(labels)}")
+
+    # Description / notes
+    desc = jack.get("description") or ""
+    notes = jack.get("notes") or ""
+    if desc:
+        console.print(f"\n[bold]Description:[/bold]\n  {desc}")
+    if notes:
+        console.print(f"\n[bold]Notes:[/bold]\n  {notes}")
+
+    # Dependencies (patch cords)
+    deps = _run_bd_json("dep", "list", jack_id)
+    if isinstance(deps, list) and deps:
+        blockers = [d.get("to_id") or d.get("depends_on", "?") for d in deps
+                    if (d.get("from_id") or d.get("issue_id")) == jack_id]
+        blocked_by_this = [d.get("from_id") or d.get("issue_id", "?") for d in deps
+                          if (d.get("to_id") or d.get("depends_on")) == jack_id]
+        if blockers:
+            console.print(f"\n[bold yellow]Patch cords in (blockers):[/bold yellow]")
+            for b in blockers:
+                console.print(f"  <- {b}")
+        if blocked_by_this:
+            console.print(f"\n[bold cyan]Patch cords out (blocks):[/bold cyan]")
+            for b in blocked_by_this:
+                console.print(f"  -> {b}")
+
+    # TSO summary
+    tso = load_tso(jack_id)
+    if tso.get("goal") or tso.get("next_action"):
+        console.print(f"\n[bold blue]TSO State:[/bold blue]")
+        if tso.get("goal"):
+            console.print(f"  Goal: {tso['goal']}")
+        na = tso.get("next_action")
+        if na:
+            if isinstance(na, dict):
+                console.print(f"  Next: {na.get('action', '?')}")
+            else:
+                console.print(f"  Next: {na}")
+
+
+# ── sw init + sw repo ────────────────────────────────────────────────────────
+
+@main.command("init")
+def init():
+    """Initialise a switchboard workspace in the current directory.
+
+    Runs `bd init --stealth` and creates repos.yaml if not present.
+    """
+    # Run bd init --stealth
+    result = _run_bd("init", "--stealth")
+    if result.returncode != 0:
+        stderr = result.stderr.strip()
+        # bd init may warn if already initialised — not fatal
+        if "already" not in stderr.lower():
+            console.print(f"[red]Error:[/red] {stderr}")
+            raise SystemExit(1)
+        console.print(f"[dim]Beads already initialised.[/dim]")
+    else:
+        console.print("[green]Beads jack graph initialised (stealth).[/green]")
+
+    # Create repos.yaml skeleton if not present
+    repos_yaml = Path("repos.yaml")
+    if repos_yaml.exists():
+        console.print("[dim]repos.yaml already exists — skipping.[/dim]")
+    else:
+        skeleton = {
+            "mode": "deliberate",
+            "repos": [],
+        }
+        with open(repos_yaml, "w") as f:
+            yaml.dump(skeleton, f, default_flow_style=False, allow_unicode=True)
+        console.print("[green]Created repos.yaml[/green]")
+
+    console.print("\nWorkspace initialised. Add repos with [bold]sw repo add <id> <url>[/bold]")
+
+
+@main.group()
+def repo():
+    """Manage registered repos."""
+    pass
+
+
+main.add_command(repo)
+
+
+@repo.command("add")
+@click.argument("repo_id")
+@click.argument("remote")
+@click.option("--name", default=None, help="Display name (default: same as id)")
+@click.option("--local-path", default=None, help="Local checkout path")
+@click.option("--version", default=None, help="Version string")
+def repo_add(repo_id, remote, name, local_path, version):
+    """Add a repo to repos.yaml.
+
+    REPO_ID: short identifier for the repo
+    REMOTE: git remote URL
+    """
+    repos_yaml = Path("repos.yaml")
+    if not repos_yaml.exists():
+        console.print("[red]Error:[/red] repos.yaml not found. Run [bold]sw init[/bold] first.")
+        raise SystemExit(1)
+
+    with open(repos_yaml) as f:
+        raw = yaml.safe_load(f) or {}
+
+    repos = raw.get("repos", [])
+    # Check for duplicate
+    if any(r.get("id") == repo_id for r in repos):
+        console.print(f"[red]Error:[/red] repo '{repo_id}' already exists")
+        raise SystemExit(1)
+
+    entry = {"id": repo_id, "name": name or repo_id, "remote": remote}
+    if local_path:
+        entry["local_path"] = local_path
+    if version:
+        entry["version"] = version
+
+    repos.append(entry)
+    raw["repos"] = repos
+    with open(repos_yaml, "w") as f:
+        yaml.dump(raw, f, default_flow_style=False, allow_unicode=True)
+
+    console.print(f"[green]Added repo:[/green] {repo_id} -> {remote}")
+
+
+@repo.command("list")
+def repo_list():
+    """List registered repos from repos.yaml."""
+    repos_yaml = Path("repos.yaml")
+    if not repos_yaml.exists():
+        console.print("[red]Error:[/red] repos.yaml not found. Run [bold]sw init[/bold] first.")
+        raise SystemExit(1)
+
+    with open(repos_yaml) as f:
+        raw = yaml.safe_load(f) or {}
+
+    repos = raw.get("repos", [])
+    if not repos:
+        console.print("[dim]No repos registered. Use [bold]sw repo add <id> <url>[/bold][/dim]")
+        return
+
+    table = Table(title="Registered Repos", box=box.ROUNDED, show_header=True, header_style="bold")
+    table.add_column("ID", style="cyan")
+    table.add_column("Name")
+    table.add_column("Remote")
+    table.add_column("Local Path", style="dim")
+    table.add_column("Version", style="yellow")
+
+    for r in repos:
+        table.add_row(
+            r.get("id", "?"),
+            r.get("name", ""),
+            r.get("remote", ""),
+            r.get("local_path", ""),
+            r.get("version", ""),
+        )
+    console.print(table)
+
+
+# ── sw log ───────────────────────────────────────────────────────────────────
+
+@main.command("log")
+@click.option("--limit", "-l", default=10, type=int, help="Number of entries (default: 10)")
+@click.option("--repo", "-r", default=None, help="Filter by repo ID")
+def log(limit, repo):
+    """Show recent activity feed: updated/created/closed jacks + session events.
+
+    Merges jack activity from bd with session events from the sessions JSONL.
+    """
+    entries = []
+
+    # Get recent jacks from bd
+    cmd = ["list", "--all", "--limit", str(limit * 2)]
+    if repo:
+        cmd.extend(["--label", repo])
+    jacks = _run_bd_json(*cmd)
+    for j in (jacks if isinstance(jacks, list) else []):
+        ts = j.get("updated_at") or j.get("created_at") or j.get("updated") or j.get("created") or ""
+        date_str = ts[:10] if ts else "?"
+        entries.append({
+            "date": date_str,
+            "sort_key": ts,
+            "status": j.get("status", "?"),
+            "id": j.get("id", "?"),
+            "priority": j.get("priority", "?"),
+            "title": j.get("title", ""),
+            "kind": "jack",
+        })
+
+    # Read session events from JSONL
+    config = _try_load_config()
+    sessions_log = config.sessions_log_path if config else SESSIONS_LOG
+    if sessions_log.exists():
+        try:
+            with open(sessions_log) as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    ev = json.loads(line)
+                    ts = ev.get("timestamp", "")
+                    date_str = ts[:10] if ts else "?"
+                    event_type = ev.get("event", "?")
+                    actor = ev.get("actor", "")
+                    title_parts = [event_type]
+                    if actor:
+                        title_parts.append(f"by {actor}")
+                    if ev.get("notes"):
+                        title_parts.append(f"- {ev['notes'][:60]}")
+                    entries.append({
+                        "date": date_str,
+                        "sort_key": ts,
+                        "status": event_type,
+                        "id": ev.get("jack_id", ""),
+                        "priority": "",
+                        "title": " ".join(title_parts),
+                        "kind": "event",
+                    })
+        except (json.JSONDecodeError, OSError):
+            pass
+
+    # Sort by timestamp descending, take limit
+    entries.sort(key=lambda e: e["sort_key"], reverse=True)
+    entries = entries[:limit]
+
+    if not entries:
+        console.print("[dim]No recent activity.[/dim]")
+        return
+
+    for e in entries:
+        st = e["status"]
+        color = _status_color(st) if e["kind"] == "jack" else "dim"
+        prio = f"P{e['priority']}  " if e["priority"] != "" else ""
+        jack_id = f"  {e['id']}" if e["id"] else ""
+        console.print(
+            f"{e['date']}  [{color}]{st:<14}[/{color}]{jack_id}  {prio}{e['title']}"
+        )
