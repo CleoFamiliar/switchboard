@@ -106,7 +106,7 @@ def _jack_text(jack: dict[str, Any], include_completion: bool = False) -> str:
     """Build the text to embed from a jack dict.
 
     Base text: title + description + notes.
-    With include_completion: also adds commit_msg + diff_summary for done jacks.
+    With include_completion: also adds commit_msg + diff_summary + decision for done jacks.
     """
     parts = [
         jack.get("title", ""),
@@ -117,6 +117,7 @@ def _jack_text(jack: dict[str, Any], include_completion: bool = False) -> str:
         parts.extend([
             jack.get("commit_msg", ""),
             jack.get("diff_summary", ""),
+            jack.get("decision", ""),
         ])
     return " ".join(p for p in parts if p).strip()
 
@@ -190,9 +191,10 @@ def index_jack_completion(
     jack_id: str,
     commit_msg: str,
     diff_summary: str,
+    decision: str = "",
     existing_jack: Optional[dict[str, Any]] = None,
 ) -> None:
-    """Index a jack's completion context (commit message + diff summary).
+    """Index a jack's completion context (commit message + diff summary + decision).
 
     Called by `sw done` after a jack is closed. Enriches the jack's vector
     with commit and diff context so future searches surface relevant history.
@@ -217,6 +219,7 @@ def index_jack_completion(
     jack = dict(existing_jack)
     jack["commit_msg"] = commit_msg
     jack["diff_summary"] = diff_summary
+    jack["decision"] = decision
     jack["indexed_at"] = datetime.datetime.now().isoformat()
 
     embed = _get_embed_fn()
@@ -239,6 +242,7 @@ def index_jack_completion(
         "updated_at": jack.get("updated_at", ""),
         "commit_msg": commit_msg,
         "diff_summary": diff_summary,
+        "decision": decision,
         "indexed_at": jack["indexed_at"],
     }
 
@@ -293,6 +297,51 @@ def search(
         payload = dict(point.payload) if point.payload else {}
         payload["score"] = point.score
         hits.append(payload)
+    return hits
+
+
+def search_similar_done_jacks(
+    client,
+    collection: str,
+    query: str,
+    exclude_jack_id: str = "",
+    limit: int = 3,
+) -> list[dict[str, Any]]:
+    """Search for similar done jacks that have a non-empty decision field.
+
+    Used by `sw resume` to surface past insights. Returns payload dicts
+    for done jacks with decision notes, excluding the current jack.
+    """
+    from qdrant_client.models import Filter, FieldCondition, MatchValue
+
+    embed = _get_embed_fn()
+    query_vector = embed(query)
+
+    # Filter: status=done only
+    conditions = [
+        FieldCondition(key="status", match=MatchValue(value="done")),
+    ]
+    query_filter = Filter(must=conditions)
+
+    # Fetch more than limit to allow filtering out empty decisions and self
+    results = client.query_points(
+        collection_name=collection,
+        query=query_vector,
+        query_filter=query_filter,
+        limit=limit + 5,
+    )
+
+    hits = []
+    for point in results.points:
+        payload = dict(point.payload) if point.payload else {}
+        # Skip self and jacks without decision notes
+        if payload.get("jack_id") == exclude_jack_id:
+            continue
+        if not payload.get("decision"):
+            continue
+        hits.append(payload)
+        if len(hits) >= limit:
+            break
     return hits
 
 

@@ -500,3 +500,76 @@ def test_log_basic(tmp_path):
         assert result.exit_code == 0
         assert "jack-abcd" in result.output
         assert "session_start" in result.output
+
+
+# ── sw done --decision ────────────────────────────────────────────────────────
+
+def test_done_with_decision_flag():
+    """sw done --decision should pass decision value through to index_jack_completion."""
+    runner = CliRunner()
+
+    mock_bd_result = mock.Mock()
+    mock_bd_result.returncode = 0
+    mock_bd_result.stdout = ""
+    mock_bd_result.stderr = ""
+
+    mock_client = mock.Mock()
+    mock_index = mock.Mock()
+
+    with mock.patch("switchboard.cli._run_bd", return_value=mock_bd_result), \
+         mock.patch("switchboard.cli._check_triggers_update"), \
+         mock.patch("switchboard.cli._try_load_config", return_value=None), \
+         mock.patch("switchboard.qdrant.get_client", return_value=mock_client), \
+         mock.patch("switchboard.qdrant.ensure_collection"), \
+         mock.patch("switchboard.qdrant.index_jack_completion", mock_index):
+        result = runner.invoke(main, [
+            "done", "jack-test1",
+            "-m", "feat: added widget",
+            "-D", "key insight: use recursion not iteration",
+        ])
+        assert result.exit_code == 0
+        assert "closed" in result.output
+
+    # Verify index_jack_completion was called with decision
+    mock_index.assert_called_once()
+    call_kwargs = mock_index.call_args
+    # Could be positional or keyword — check keyword args
+    assert call_kwargs[1]["decision"] == "key insight: use recursion not iteration"
+    assert call_kwargs[1]["commit_msg"] == "feat: added widget"
+
+
+# ── sw resume similar jacks ──────────────────────────────────────────────────
+
+def test_resume_shows_similar_jacks(tmp_path):
+    """sw resume should show similar past jacks with decision notes."""
+    runner = CliRunner()
+
+    mock_similar = [
+        {"jack_id": "jack-past1", "title": "Fix parser bug", "decision": "switched to SAX parser"},
+        {"jack_id": "jack-past2", "title": "Refactor lexer", "decision": "split into two passes"},
+    ]
+
+    mock_jack_info = {
+        "id": "jack-resume1",
+        "title": "Fix compiler issue",
+        "description": "Compiler crashes on nested expressions",
+        "status": "in_progress",
+    }
+
+    def mock_bd_json(*args):
+        if "show" in args:
+            return mock_jack_info
+        return []
+
+    with mock.patch("switchboard.cli.TSO_DIR", tmp_path), \
+         mock.patch("switchboard.cli._run_bd_json", side_effect=mock_bd_json), \
+         mock.patch("switchboard.cli._try_load_config", return_value=None), \
+         mock.patch("switchboard.qdrant.get_client"), \
+         mock.patch("switchboard.qdrant.search_similar_done_jacks", return_value=mock_similar):
+        result = runner.invoke(main, ["resume", "jack-resume1"])
+        assert result.exit_code == 0
+        assert "Similar past jacks:" in result.output
+        assert "jack-past1" in result.output
+        assert "switched to SAX parser" in result.output
+        assert "jack-past2" in result.output
+        assert "split into two passes" in result.output

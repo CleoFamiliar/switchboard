@@ -405,11 +405,13 @@ def _log_update_event(sessions_log: Path, jack_id: str, status, notes, claim):
 @click.argument("jack_id")
 @click.option("--commit-msg", "-m", default=None, help="Commit message for this jack")
 @click.option("--diff-summary", "-d", default=None, help="Brief diff/change summary")
-def done(jack_id, commit_msg, diff_summary):
+@click.option("--decision", "-D", default=None, help="Key decision or insight that unblocked this jack")
+def done(jack_id, commit_msg, diff_summary, decision):
     """Mark a jack done and index its completion context into Qdrant.
 
-    Closes the jack via bd, then indexes the commit message and diff summary
-    for semantic search. Patch cord (dependency) unblocking is handled by bd.
+    Closes the jack via bd, then indexes the commit message, diff summary,
+    and decision note for semantic search. Patch cord (dependency) unblocking
+    is handled by bd.
 
     JACK_ID: beads jack ID (e.g. jack-a1b2)
     """
@@ -423,7 +425,7 @@ def done(jack_id, commit_msg, diff_summary):
     _check_triggers_update(jack_id)
 
     # Index completion context in Qdrant if available
-    if commit_msg or diff_summary:
+    if commit_msg or diff_summary or decision:
         config = _try_load_config()
         if config:
             host, port, collection = config.qdrant.host, config.qdrant.port, config.qdrant.collection
@@ -437,6 +439,7 @@ def done(jack_id, commit_msg, diff_summary):
                 client, collection, jack_id,
                 commit_msg=commit_msg or "",
                 diff_summary=diff_summary or "",
+                decision=decision or "",
             )
             console.print(f"[dim]Indexed completion context in Qdrant.[/dim]")
         except Exception as e:
@@ -763,7 +766,51 @@ def resume(jack_id, raw):
         for s in surprises:
             console.print(f"  ! {s}")
 
+    # Surface similar past jacks with decision notes
+    _show_similar_jacks(jack_id, tso)
+
     console.print()
+
+
+def _show_similar_jacks(jack_id: str, tso: dict):
+    """Search Qdrant for similar done jacks with decision notes."""
+    try:
+        # Build query from jack title/description (from bd) + TSO goal
+        jack_info = _run_bd_json("show", jack_id)
+        if isinstance(jack_info, list):
+            jack_info = jack_info[0] if jack_info else {}
+        if not isinstance(jack_info, dict):
+            jack_info = {}
+
+        query_parts = [
+            jack_info.get("title", ""),
+            jack_info.get("description", ""),
+            tso.get("goal", "") or "",
+        ]
+        query_text = " ".join(p for p in query_parts if p).strip()
+        if not query_text:
+            return
+
+        config = _try_load_config()
+        if config:
+            host, port, collection = config.qdrant.host, config.qdrant.port, config.qdrant.collection
+        else:
+            host, port, collection = "localhost", 6333, "switchyard"
+
+        from .qdrant import get_client, search_similar_done_jacks
+        client = get_client(host=host, port=port)
+        similar = search_similar_done_jacks(client, collection, query_text, exclude_jack_id=jack_id, limit=3)
+
+        if similar:
+            console.print(f"\n[bold]Similar past jacks:[/bold]")
+            for s in similar:
+                sid = s.get("jack_id", "?")
+                stitle = s.get("title", "")
+                sdecision = s.get("decision", "")
+                console.print(f"  [cyan]{sid}[/cyan]  {stitle}")
+                console.print(f"    [dim]decision: {sdecision}[/dim]")
+    except Exception:
+        pass  # Additive feature — skip silently if Qdrant unavailable
 
 
 # ── sw state ─────────────────────────────────────────────────────────────────
