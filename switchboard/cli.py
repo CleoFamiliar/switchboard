@@ -1490,6 +1490,83 @@ def notify_list(show_all):
     console.print(table)
 
 
+@main.command()
+@click.option('--dry-run', is_flag=True, help='Detect only, do not write dep links or notify')
+@click.option('--repo', '-r', default=None, help='Filter to jacks labelled with this repo ID')
+def sweep(dry_run, repo):
+    """Sweep all open jacks through CrossRepoSkill to catch missed cross-repo deps.
+
+    Safe to run anytime — HIGH confidence deps are linked automatically, MEDIUM/LOW
+    go to the notification queue. Use --dry-run to preview without side effects.
+    """
+    from .skills.cross_repo import CrossRepoSkill
+    from .skills.registry import SkillRegistry
+
+    config = _try_load_config()
+    registry = SkillRegistry()
+    registry.register(CrossRepoSkill())
+
+    cmd = ['list', '--limit', '0']
+    if repo:
+        cmd.extend(['--label', repo])
+    jacks = _run_bd_json(*cmd)
+    # filter to open/in_progress only
+    jacks = [j for j in jacks if j.get('status') in ('open', 'in_progress')] if isinstance(jacks, list) else []
+
+    if not jacks:
+        console.print('[dim]No open jacks to sweep.[/dim]')
+        return
+
+    no_llm = bool(os.environ.get('BEADS_NO_LLM'))
+    if no_llm:
+        console.print('[dim]BEADS_NO_LLM set — LLM inference tier skipped.[/dim]')
+
+    console.print(f'Sweeping [cyan]{len(jacks)}[/cyan] open jack(s)...')
+    total_results = 0
+
+    for jack in jacks:
+        event = {
+            'type': 'task.created',
+            'jack_id': jack.get('id', ''),
+            'title': jack.get('title', ''),
+            'body': jack.get('description', ''),
+            'labels': jack.get('labels') or [],
+            'repo': '',
+        }
+        if dry_run:
+            # For dry run: just detect, don't write
+            from .skills.cross_repo import detect_dependencies, _build_artifact_index
+            deps = detect_dependencies(
+                title=event['title'],
+                body=event['body'],
+                labels=event['labels'],
+                repo_ids=[r.id for r in config.repos] if config else [],
+                artifacts_by_repo=_build_artifact_index(config) if config else {},
+            )
+            if deps:
+                for dep in deps:
+                    console.print(
+                        f'  [yellow][dry-run][/yellow] [cyan]{jack["id"]}[/cyan] '
+                        f'{jack["title"][:50]} → {dep.to_repo} ({dep.confidence.value})'
+                    )
+                total_results += len(deps)
+        else:
+            results = registry.run_all(event, config)
+            for r in results:
+                style = 'green' if r.auto_applied else 'yellow'
+                console.print(
+                    f'  [{style}]{r.confidence.value}[/{style}] [cyan]{jack["id"]}[/cyan] '
+                    f'{jack["title"][:50]}: {r.action}'
+                )
+            total_results += len(results)
+
+    if total_results == 0:
+        console.print('[dim]No cross-repo dependencies detected.[/dim]')
+    else:
+        console.print(f'\n[bold]Found {total_results} result(s).[/bold]' +
+                      (' [dim](dry run — nothing written)[/dim]' if dry_run else ''))
+
+
 @notify.command('ack')
 @click.argument('notification_id')
 def notify_ack(notification_id):

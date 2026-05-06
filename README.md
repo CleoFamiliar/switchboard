@@ -63,6 +63,21 @@ sw mode set prototype              # auto-ack holds with requires:any
 sw mode set deliberate             # require explicit human ack (default)
 ```
 
+## Periodic Sweep
+
+Run anytime as a safety net to catch cross-repo dependencies that webhooks may have missed:
+
+```bash
+sw sweep              # detect and act (HIGH auto-links, MEDIUM/LOW → notify queue)
+sw sweep --dry-run    # preview only, no side effects
+sw sweep -r main-app  # limit to jacks labelled for a specific repo
+```
+
+For continuous coverage, add a cron job (crontab -e):
+```cron
+*/15 * * * * cd /path/to/your/workspace && sw sweep >> ~/.switchboard/sweep.log 2>&1
+```
+
 ## Configuration
 
 See [`repos.yaml`](repos.yaml) for workspace config: registered repos, hold policies, Qdrant settings, and session tracking.

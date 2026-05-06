@@ -7,11 +7,15 @@ Detection pipeline (in order, stop at first match):
 4. LLM inference (LOW): call 'claude --print' to infer cross-repo dependencies
 """
 
+import hashlib
 import json
 import logging
+import os
 import re
 import subprocess
+import time
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Optional
 
 from .base import BaseSkill, Confidence, SkillResult
@@ -20,6 +24,30 @@ logger = logging.getLogger(__name__)
 
 # Events this skill handles
 _HANDLED_EVENTS = {"task.created", "task.closed", "pr.opened", "pr.merged"}
+
+# ── LLM result cache ─────────────────────────────────────────────────────────
+
+_CACHE_PATH = Path.home() / '.switchboard' / 'llm-cache.json'
+_CACHE_TTL = 86400  # 24 hours
+
+
+def _load_cache() -> dict:
+    if _CACHE_PATH.exists():
+        try:
+            return json.loads(_CACHE_PATH.read_text())
+        except Exception:
+            return {}
+    return {}
+
+
+def _save_cache(cache: dict) -> None:
+    _CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    _CACHE_PATH.write_text(json.dumps(cache, indent=2))
+
+
+def _cache_key(title: str, body: str, repo_ids: list[str]) -> str:
+    payload = json.dumps({'title': title, 'body': body, 'repos': sorted(repo_ids)}, sort_keys=True)
+    return hashlib.sha256(payload.encode()).hexdigest()[:16]
 
 
 @dataclass
@@ -199,6 +227,28 @@ def _check_artifact_registry(
     return results
 
 
+def _extract_json(text: str) -> Optional[dict]:
+    """Robust JSON extraction — tries regex, then progressively smaller substrings."""
+    # 1. Try regex for outermost { ... }
+    json_match = re.search(r"\{.*\}", text, re.DOTALL)
+    if json_match:
+        try:
+            return json.loads(json_match.group())
+        except json.JSONDecodeError:
+            pass
+
+    # 2. Try progressively smaller substrings starting from each '{'
+    for i, ch in enumerate(text):
+        if ch == '{':
+            for j in range(len(text), i, -1):
+                if text[j - 1] == '}':
+                    try:
+                        return json.loads(text[i:j])
+                    except json.JSONDecodeError:
+                        continue
+    return None
+
+
 def _check_llm_inference(
     title: str, body: str, repo_ids: list[str]
 ) -> list[DetectedDependency]:
@@ -206,15 +256,37 @@ def _check_llm_inference(
     if not title and not body:
         return []
 
+    # Check BEADS_NO_LLM env var
+    if os.environ.get('BEADS_NO_LLM'):
+        return []
+
+    # Check cache
+    key = _cache_key(title, body, repo_ids)
+    cache = _load_cache()
+    cached = cache.get(key)
+    if cached and (time.time() - cached.get('ts', 0)) < _CACHE_TTL:
+        data = cached.get('result')
+        if data and data.get("has_dependency") and data.get("to_repo") in repo_ids:
+            return [DetectedDependency(
+                from_repo=data.get("from_repo", ""),
+                to_repo=data["to_repo"],
+                artifact=data.get("artifact"),
+                confidence=Confidence.LOW,
+            )]
+        return []
+
     prompt = (
-        f"Given these repos: {repo_ids}\n"
-        f"And this task:\n"
-        f"Title: {title}\n"
-        f"Description: {body}\n\n"
-        f"Is there a cross-repo dependency? "
-        f"Return ONLY valid JSON (no markdown): "
-        f'{{"has_dependency": bool, "from_repo": str, "to_repo": str, '
-        f'"artifact": str, "reasoning": str}}'
+        'You are analyzing a software task to detect cross-repository dependencies.\n\n'
+        f'Registered repos: {repo_ids}\n\n'
+        f'Task title: {title}\n'
+        f'Task description: {body or "(none)"}\n\n'
+        'Does this task require an artifact, component, API, or contract from a DIFFERENT repo listed above?\n'
+        'Only answer yes if there is a clear, specific dependency — not just general similarity.\n\n'
+        'Respond with ONLY valid JSON (no markdown fences):\n'
+        '{"has_dependency": bool, "from_repo": "repo that needs the artifact (or empty)", '
+        '"to_repo": "repo that provides the artifact", '
+        '"artifact": "specific artifact name (or empty)", '
+        '"reasoning": "one sentence"}'
     )
 
     try:
@@ -225,14 +297,16 @@ def _check_llm_inference(
         if result.returncode != 0:
             return []
 
-        # Parse JSON from output
+        # Parse JSON from output using robust extractor
         output = result.stdout.strip()
-        # Try to extract JSON from possible markdown wrapping
-        json_match = re.search(r"\{.*\}", output, re.DOTALL)
-        if not json_match:
+        data = _extract_json(output)
+        if data is None:
             return []
 
-        data = json.loads(json_match.group())
+        # Cache the result
+        cache[key] = {'ts': time.time(), 'result': data}
+        _save_cache(cache)
+
         if data.get("has_dependency") and data.get("to_repo") in repo_ids:
             return [DetectedDependency(
                 from_repo=data.get("from_repo", ""),
@@ -240,7 +314,9 @@ def _check_llm_inference(
                 artifact=data.get("artifact"),
                 confidence=Confidence.LOW,
             )]
-    except (subprocess.TimeoutExpired, FileNotFoundError, json.JSONDecodeError, OSError):
+    except subprocess.TimeoutExpired:
+        logger.warning("LLM inference timed out for jack: %s", title[:80])
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
         pass  # claude CLI unavailable or failed — skip gracefully
 
     return []
