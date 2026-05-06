@@ -26,12 +26,34 @@ import yaml
 
 
 @dataclass
+class ArtifactConfig:
+    name: str
+    kind: str  # e.g. "component", "hook", "service", "schema"
+
+
+@dataclass
 class RepoConfig:
     id: str
     name: str
     remote: str
     local_path: Optional[str] = None
     version: Optional[str] = None
+    artifacts: list[ArtifactConfig] = field(default_factory=list)
+
+
+@dataclass
+class DoltConfig:
+    mode: str = "embedded"  # "embedded" (per-repo) | "server" (shared)
+    host: str = "127.0.0.1"
+    port: int = 3307
+    user: str = "root"
+    # password via BEADS_DOLT_PASSWORD env var
+
+
+@dataclass
+class WebhookConfig:
+    port: int = 8765
+    github_secret_env: str = "GITHUB_WEBHOOK_SECRET"
 
 
 @dataclass
@@ -58,6 +80,8 @@ class Config:
     repos: list[RepoConfig] = field(default_factory=list)
     checkpoint_defaults: HoldDefaults = field(default_factory=HoldDefaults)
     qdrant: QdrantConfig = field(default_factory=QdrantConfig)
+    dolt: DoltConfig = field(default_factory=DoltConfig)
+    webhook: WebhookConfig = field(default_factory=WebhookConfig)
     sessions_log_path: Path = Path("~/.openclaw/workspace/orchestration/sessions.jsonl")
     mode: str = "deliberate"  # "deliberate" | "prototype"
 
@@ -102,12 +126,19 @@ def load_config(path: Optional[Path] = None) -> Config:
         lp = r.get("local_path")
         if lp:
             lp = str(Path(lp).expanduser())
+        artifacts = []
+        for a in r.get("artifacts", []):
+            artifacts.append(ArtifactConfig(
+                name=a["name"],
+                kind=a.get("kind", "component"),
+            ))
         repos.append(RepoConfig(
             id=r["id"],
             name=r.get("name", r["id"]),
             remote=r.get("remote", ""),
             local_path=lp,
             version=r.get("version"),
+            artifacts=artifacts,
         ))
 
     # Validate unique IDs
@@ -136,6 +167,20 @@ def load_config(path: Optional[Path] = None) -> Config:
         "~/.openclaw/workspace/orchestration/sessions.jsonl",
     )).expanduser()
 
+    d_raw = raw.get("dolt", {})
+    dolt = DoltConfig(
+        mode=d_raw.get("mode", "embedded"),
+        host=d_raw.get("host", "127.0.0.1"),
+        port=d_raw.get("port", 3307),
+        user=d_raw.get("user", "root"),
+    )
+
+    w_raw = raw.get("webhook", {})
+    webhook = WebhookConfig(
+        port=w_raw.get("port", 8765),
+        github_secret_env=w_raw.get("github_secret_env", "GITHUB_WEBHOOK_SECRET"),
+    )
+
     workspace_mode = raw.get("mode", "deliberate")
     if workspace_mode not in ("deliberate", "prototype"):
         workspace_mode = "deliberate"
@@ -144,6 +189,8 @@ def load_config(path: Optional[Path] = None) -> Config:
         repos=repos,
         checkpoint_defaults=cp,
         qdrant=qdrant,
+        dolt=dolt,
+        webhook=webhook,
         sessions_log_path=log_path,
         mode=workspace_mode,
     )

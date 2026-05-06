@@ -14,6 +14,9 @@ dependencies = [
     "rich>=13.0",
     "qdrant-client>=1.7",
     "sentence-transformers>=3.0",
+    "fastapi>=0.100",
+    "uvicorn>=0.20",
+    "httpx>=0.24",
 ]
 
 [project.scripts]

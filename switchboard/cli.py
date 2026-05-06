@@ -1418,3 +1418,85 @@ def log(limit, repo):
         console.print(
             f"{e['date']}  [{color}]{st:<14}[/{color}]{jack_id}  {prio}{e['title']}"
         )
+
+
+# ── sw dolt-env ──────────────────────────────────────────────────────────────
+
+@main.command('dolt-env')
+def dolt_env():
+    """Print export statements for shared Dolt server config."""
+    config = _try_load_config()
+    dolt = config.dolt if config else None
+    if not dolt or dolt.mode != 'server':
+        console.print('[dim]Dolt mode is embedded (default). No env needed.[/dim]')
+        console.print('[dim]To use a shared server, set dolt.mode: server in repos.yaml[/dim]')
+        return
+    console.print(f'export BEADS_DOLT_SERVER_HOST={dolt.host}')
+    console.print(f'export BEADS_DOLT_SERVER_PORT={dolt.port}')
+    console.print(f'export BEADS_DOLT_SERVER_USER={dolt.user}')
+    console.print('# Set BEADS_DOLT_PASSWORD if your server requires auth')
+
+
+# ── sw webhook-start ─────────────────────────────────────────────────────────
+
+@main.command('webhook-start')
+@click.option('--host', default='0.0.0.0')
+@click.option('--port', default=None, type=int)
+def webhook_start(host, port):
+    """Start the FastAPI webhook server."""
+    import uvicorn
+    from .webhook import app, set_config
+    config = _try_load_config()
+    set_config(config)
+    p = port or (config.webhook.port if config else 8765)
+    console.print(f'[green]Starting Switchboard webhook on {host}:{p}[/green]')
+    uvicorn.run(app, host=host, port=p)
+
+
+# ── sw notify ────────────────────────────────────────────────────────────────
+
+@main.group()
+def notify():
+    """Manage skill notifications (pending cross-repo detections)."""
+    pass
+
+
+main.add_command(notify)
+
+
+@notify.command('list')
+@click.option('--all', 'show_all', is_flag=True, help='Include acked notifications')
+def notify_list(show_all):
+    """List pending notifications."""
+    from .notifications import list_notifications
+    status = None if show_all else 'pending'
+    items = list_notifications(status=status)
+    if not items:
+        console.print('[dim]No pending notifications.[/dim]')
+        return
+    table = Table(title='Notifications', box=box.ROUNDED, show_header=True, header_style='bold')
+    table.add_column('ID', style='cyan')
+    table.add_column('Confidence', style='yellow')
+    table.add_column('Message', max_width=60)
+    table.add_column('Jacks', style='dim')
+    table.add_column('Status')
+    for n in items:
+        status_style = 'green' if n['status'] == 'acked' else 'yellow'
+        table.add_row(
+            n['id'], n['confidence'], n['message'],
+            ', '.join(n.get('jack_ids', [])),
+            f'[{status_style}]{n["status"]}[/{status_style}]',
+        )
+    console.print(table)
+
+
+@notify.command('ack')
+@click.argument('notification_id')
+def notify_ack(notification_id):
+    """Acknowledge a notification."""
+    from .notifications import ack_notification
+    if ack_notification(notification_id):
+        console.print(f'[green]Notification {notification_id} acknowledged.[/green]')
+    else:
+        console.print(f'[red]Notification {notification_id} not found.[/red]')
+        raise SystemExit(1)
