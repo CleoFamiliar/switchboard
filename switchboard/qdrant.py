@@ -212,7 +212,8 @@ def index_jack_completion(
             capture_output=True, text=True,
         )
         if result.returncode == 0 and result.stdout.strip():
-            existing_jack = json.loads(result.stdout)
+            parsed = json.loads(result.stdout)
+            existing_jack = parsed[0] if isinstance(parsed, list) else parsed
         else:
             existing_jack = {"id": jack_id}
 
