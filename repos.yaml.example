@@ -1,0 +1,55 @@
+# repos.yaml.example — copy to repos.yaml and fill in your workspace
+#
+# Register repos that participate in your orchestrated workspace.
+# Each repo can participate in cross-repo patch cord (dependency) tracking
+# via `triggers_update` relations in the jack graph.
+#
+# Operators: your-human-name (human) or your-agent-name (AI agent)
+
+mode: deliberate  # "deliberate" | "prototype"
+
+dolt:
+  mode: server          # 'embedded' (default, per-repo) | 'server' (shared)
+  host: 127.0.0.1
+  port: 3307
+  user: root
+  # password via BEADS_DOLT_PASSWORD env var
+
+webhook:
+  port: 8765
+  github_secret_env: GITHUB_WEBHOOK_SECRET
+
+repos:
+  - id: component-lib
+    name: component-lib
+    remote: https://github.com/your-org/component-lib.git
+    local_path: ~/projects/component-lib
+    version: "1.0.0"   # current published version (track for dep updates)
+
+  - id: main-app
+    name: main-app
+    remote: https://github.com/your-org/main-app.git
+    local_path: ~/projects/main-app
+    version: null      # monorepo, not versioned as a single package
+
+  - id: workspace
+    name: workspace
+    remote: https://github.com/your-agent/workspace.git
+    local_path: ~/.openclaw/workspace
+
+# Hold policy: who can ack holds (checkpoint jacks) by default
+checkpoint_defaults:
+  requires: kale         # default: human operator in the loop
+  publish_requires: kale
+  deploy_requires: kale
+  test_requires: any     # integration tests: either operator can ack
+
+# Qdrant settings
+qdrant:
+  host: localhost
+  port: 6333
+  collection: switchyard
+
+# Session tracking
+sessions:
+  log_path: ~/.openclaw/workspace/orchestration/sessions.jsonl
