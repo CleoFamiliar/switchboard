@@ -17,6 +17,7 @@ from fastapi import FastAPI, Header, HTTPException, Request
 
 from .skills import SkillRegistry
 from .skills.cross_repo import CrossRepoSkill
+from .skills.pr_merge import PRMergeSkill
 
 app = FastAPI(title="Switchboard Webhook", version="0.1.0")
 
@@ -30,6 +31,7 @@ def get_registry() -> SkillRegistry:
     if _registry is None:
         _registry = SkillRegistry()
         _registry.register(CrossRepoSkill())
+        _registry.register(PRMergeSkill())
     return _registry
 
 
