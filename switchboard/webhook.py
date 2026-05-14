@@ -18,6 +18,7 @@ from fastapi import FastAPI, Header, HTTPException, Request
 from .skills import SkillRegistry
 from .skills.cross_repo import CrossRepoSkill
 from .skills.pr_merge import PRMergeSkill
+from .skills.pr_review import PRReviewSkill
 
 app = FastAPI(title="Switchboard Webhook", version="0.1.0")
 
@@ -32,6 +33,7 @@ def get_registry() -> SkillRegistry:
         _registry = SkillRegistry()
         _registry.register(CrossRepoSkill())
         _registry.register(PRMergeSkill())
+        _registry.register(PRReviewSkill())
     return _registry
 
 
@@ -152,6 +154,23 @@ def _parse_github_event(event_name: str, payload: dict) -> Optional[dict]:
             "labels": [l.get("name", "") for l in pr.get("labels", [])],
             "sha": pr.get("head", {}).get("sha", ""),
             "merged": merged,
+        }
+    elif event_name == "pull_request_review":
+        review = payload.get("review", {})
+        pr = payload.get("pull_request", {})
+        return {
+            "type": "pr.reviewed",
+            "repo": payload.get("repository", {}).get("name", ""),
+            "ref": pr.get("head", {}).get("ref", ""),
+            "title": pr.get("title", ""),
+            "body": pr.get("body", ""),
+            "pr_url": pr.get("html_url", ""),
+            "labels": [l.get("name", "") for l in pr.get("labels", [])],
+            "sha": pr.get("head", {}).get("sha", ""),
+            "merged": pr.get("merged", False),
+            "review_state": review.get("state", ""),
+            "review_body": review.get("body", ""),
+            "reviewer": review.get("user", {}).get("login", ""),
         }
     elif event_name == "create":
         return {
